@@ -266,6 +266,18 @@ impl<'a, T> Array<'a, T, (usize, usize, usize)> for Array3d<T> where T: 'a + Cop
   }
 }
 
+impl<T> Array3d<T> where T: Copy {
+  pub fn deserialize(reader: &mut Read) -> Result<Array3d<T>, ()> {
+    // TODO(20151218)
+    unimplemented!();
+  }
+
+  pub fn serialize(&self, writer: &mut Write) {
+    // TODO(20151218)
+    unimplemented!();
+  }
+}
+
 pub struct Array3dView<'a, T> where T: 'a + Copy {
   data:     &'a [T],
   bound:    (usize, usize, usize),
