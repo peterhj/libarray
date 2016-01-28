@@ -115,7 +115,8 @@ pub trait ArrayZeroExt<T, S> where T: Copy, S: Shape {
   fn zeros(bound: S) -> Self;
 }
 
-pub trait NdArraySerialize<T> where T: SerialDataType + Copy {
+pub trait NdArraySerialize<T, S> where T: SerialDataType + Copy, S: Shape {
+  fn serial_size(bound: S) -> usize;
   fn deserialize(reader: &mut Read) -> Result<Self, ()> where Self: Sized;
   fn serialize(&self, writer: &mut Write) -> Result<(), ()>;
 }
@@ -138,7 +139,7 @@ impl<T> Array2d<T> where T: Copy {
     }
   }
 
-  pub fn as_slice(&mut self) -> &[T] {
+  pub fn as_slice(&self) -> &[T] {
     &self.data
   }
 
@@ -163,7 +164,11 @@ impl<T> ArrayZeroExt<T, (usize, usize)> for Array2d<T> where T: Zero + Copy {
   }
 }
 
-impl<T> NdArraySerialize<T> for Array2d<T> where T: SerialDataType + Copy {
+impl<T> NdArraySerialize<T, (usize, usize)> for Array2d<T> where T: SerialDataType + Copy {
+  fn serial_size(bound: (usize, usize)) -> usize {
+    24 + bound.len()
+  }
+
   fn deserialize(reader: &mut Read) -> Result<Array2d<T>, ()> {
     let magic0 = reader.read_u8()
       .ok().expect("failed to deserialize!");
@@ -322,6 +327,140 @@ impl<'a, T> Array2dViewMut<'a, T> where T: 'a + Copy {
   }
 }
 
+pub struct BitArray3d {
+  data:     Vec<u64>,
+  bound:    (usize, usize, usize),
+  raw_len:  usize,
+}
+
+impl BitArray3d {
+  pub unsafe fn new(bound: (usize, usize, usize)) -> BitArray3d {
+    let len = bound.len();
+    let raw_len = (len + 64 - 1) / 64;
+    let mut data = Vec::with_capacity(raw_len);
+    unsafe { data.set_len(raw_len) };
+    BitArray3d{
+      data:     data,
+      bound:    bound,
+      raw_len:  raw_len,
+    }
+  }
+
+  pub fn from_byte_array(arr: &Array3d<u8>) -> BitArray3d {
+    assert!(arr.stride == arr.bound.to_least_stride());
+    let mut raw_arr = unsafe { BitArray3d::new(arr.bound) };
+    let len = raw_arr.bound.len();
+    let raw_len = (len + 64 - 1) / 64;
+    {
+      let mut idx = 0;
+      for p in 0 .. raw_len {
+        raw_arr.data[p] = 0;
+        for s in 0 .. 64 {
+          if arr.data[idx] != 0 {
+            raw_arr.data[p] |= 1u64 << s;
+          }
+          idx += 1;
+          if idx >= len {
+            break;
+          }
+        }
+      }
+    }
+    raw_arr
+  }
+
+  pub fn to_byte_array(&self) -> Array3d<u8> {
+    let mut array = unsafe { Array3d::new(self.bound) };
+    let len = self.bound.len();
+    let raw_len = self.raw_len;
+    {
+      let mut idx = 0;
+      for p in 0 .. raw_len {
+        let mask = self.data[p];
+        for s in 0 .. 64 {
+          if 64 * p + s < len {
+            array.data[idx] = ((mask >> s) & 1) as u8;
+            idx += 1;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+    array
+  }
+}
+
+impl BitArray3d {
+  pub fn serial_size(bound: (usize, usize, usize)) -> usize {
+    32 + (bound.len() + 64 - 1) / 64 * 8
+  }
+
+  pub fn deserialize(reader: &mut Read) -> Result<BitArray3d, ()> {
+    let magic0 = reader.read_u8()
+      .ok().expect("failed to deserialize!");
+    let magic1 = reader.read_u8()
+      .ok().expect("failed to deserialize!");
+    assert_eq!(magic0, b'N');
+    assert_eq!(magic1, b'D');
+    let version = reader.read_u8()
+      .ok().expect("failed to deserialize!");
+    assert_eq!(version, 0);
+    let data_ty = reader.read_u8()
+      .ok().expect("failed to deserialize!");
+    let ndim = reader.read_u32::<LittleEndian>()
+      .ok().expect("failed to deserialize!");
+    let expected_data_ty = 255u8;
+    assert_eq!(data_ty, expected_data_ty);
+    assert_eq!(ndim, 3);
+    let bound0 = reader.read_u64::<LittleEndian>()
+      .ok().expect("failed to deserialize!") as usize;
+    let bound1 = reader.read_u64::<LittleEndian>()
+      .ok().expect("failed to deserialize!") as usize;
+    let bound2 = reader.read_u64::<LittleEndian>()
+      .ok().expect("failed to deserialize!") as usize;
+    let dims = (bound0, bound1, bound2);
+    let mut arr = unsafe { BitArray3d::new(dims) };
+    {
+      let mut data_bytes = unsafe { from_raw_parts_mut(arr.data.as_mut_ptr() as *mut u8, 8 * arr.raw_len) };
+      let mut read_idx: usize = 0;
+      loop {
+        match reader.read(&mut data_bytes[read_idx ..]) {
+          Ok(n) => {
+            read_idx += n;
+            if n == 0 {
+              break;
+            }
+          }
+          Err(e) => panic!("failed to deserialize: {:?}", e),
+        }
+      }
+      assert_eq!(read_idx, data_bytes.len());
+    }
+    Ok(arr)
+  }
+
+  pub fn serialize(&self, writer: &mut Write) -> Result<(), ()> {
+    let ty_id = 255u8;
+    writer.write_u32::<LittleEndian>(0x0000444e | ((ty_id as u32) << 24))
+      .ok().expect("failed to serialize!");
+    writer.write_u32::<LittleEndian>(3)
+      .ok().expect("failed to serialize!");
+    let (bound0, bound1, bound2) = self.bound;
+    writer.write_u64::<LittleEndian>(bound0 as u64)
+      .ok().expect("failed to serialize!");
+    writer.write_u64::<LittleEndian>(bound1 as u64)
+      .ok().expect("failed to serialize!");
+    writer.write_u64::<LittleEndian>(bound2 as u64)
+      .ok().expect("failed to serialize!");
+    let bytes = unsafe { from_raw_parts(self.data.as_ptr() as *const u8, 8 * self.raw_len) };
+    writer.write_all(bytes)
+      .ok().expect("failed to serialize!");
+    Ok(())
+  }
+}
+
+#[derive(Clone)]
 pub struct Array3d<T> where T: Copy {
   data:     Vec<T>,
   bound:    (usize, usize, usize),
@@ -361,6 +500,16 @@ impl<T> Array3d<T> where T: Copy {
     }
   }
 
+  pub fn with_data(data: Vec<T>, bound: (usize, usize, usize)) -> Array3d<T> {
+    let len = bound.len();
+    assert_eq!(len, data.len());
+    Array3d{
+      data:     data,
+      bound:    bound,
+      stride:   bound.to_least_stride(),
+    }
+  }
+
   pub fn as_slice(&self) -> &[T] {
     &self.data
   }
@@ -368,9 +517,21 @@ impl<T> Array3d<T> where T: Copy {
   pub fn as_mut_slice(&mut self) -> &mut [T] {
     &mut self.data
   }
+
+  pub fn bound(&self) -> (usize, usize, usize) {
+    self.bound
+  }
+
+  pub fn stride(&self) -> (usize, usize) {
+    self.stride
+  }
 }
 
-impl<T> NdArraySerialize<T> for Array3d<T> where T: SerialDataType + Copy {
+impl<T> NdArraySerialize<T, (usize, usize, usize)> for Array3d<T> where T: SerialDataType + Copy {
+  fn serial_size(bound: (usize, usize, usize)) -> usize {
+    32 + bound.len()
+  }
+
   fn deserialize(reader: &mut Read) -> Result<Array3d<T>, ()> {
     let magic0 = reader.read_u8()
       .ok().expect("failed to deserialize!");
