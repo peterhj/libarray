@@ -1,3 +1,4 @@
+#![feature(clone_from_slice)]
 #![feature(zero_one)]
 
 extern crate byteorder;
@@ -15,6 +16,41 @@ pub trait Shape: Copy {
   fn to_least_stride(&self) -> Self::Stride;
   fn len(&self) -> usize;
   fn offset(&self, stride: Self::Stride) -> usize;
+
+  fn major_iter(self) -> MajorIter<Self> where Self: Default {
+    MajorIter{
+      idx:          Default::default(),
+      upper_bound:  self,
+    }
+  }
+}
+
+pub struct MajorIter<S> where S: Shape {
+  idx:          S,
+  upper_bound:  S,
+}
+
+impl Iterator for MajorIter<(usize, usize, usize)> {
+  type Item = (usize, usize, usize);
+
+  fn next(&mut self) -> Option<(usize, usize, usize)> {
+    // FIXME(20160203): this only terminates "once".
+    self.idx.0 += 1;
+    if self.idx.0 < self.upper_bound.0 {
+      return Some(self.idx);
+    }
+    self.idx.0 = 0;
+    self.idx.1 += 1;
+    if self.idx.1 < self.upper_bound.1 {
+      return Some(self.idx);
+    }
+    self.idx.1 = 0;
+    self.idx.2 += 1;
+    if self.idx.2 < self.upper_bound.2 {
+      return Some(self.idx);
+    }
+    None
+  }
 }
 
 impl Shape for usize {
@@ -99,7 +135,7 @@ pub trait ArrayView<'a, T, S> where T: 'a + Copy, S: Shape {
   fn stride(&self) -> S::Stride;
   fn len(&self) -> usize;
   unsafe fn as_ptr(&self) -> *const T;
-  fn view(&self, lo: S, hi: S) -> Self;
+  fn view(self, lo: S, hi: S) -> Self;
 }
 
 pub trait ArrayViewMut<'a, T, S>/*: ArrayView<'a, T, S>*/ where T: 'a + Copy, S: Shape {
@@ -108,7 +144,7 @@ pub trait ArrayViewMut<'a, T, S>/*: ArrayView<'a, T, S>*/ where T: 'a + Copy, S:
   fn len(&self) -> usize;
   unsafe fn as_ptr(&self) -> *const T;
   unsafe fn as_mut_ptr(&mut self) -> *mut T;
-  fn view_mut(&mut self, lo: S, hi: S) -> Self;
+  fn view_mut(self, lo: S, hi: S) -> Self;
 }
 
 pub trait ArrayZeroExt<T, S> where T: Copy, S: Shape {
@@ -276,7 +312,7 @@ impl<'a, T> ArrayView<'a, T, (usize, usize)> for Array2dView<'a, T> where T: 'a 
     self.data.as_ptr()
   }
 
-  fn view(&self, lo: (usize, usize), hi: (usize, usize)) -> Array2dView<'a, T> {
+  fn view(self, lo: (usize, usize), hi: (usize, usize)) -> Array2dView<'a, T> {
     // TODO(20151215)
     unimplemented!();
   }
@@ -315,7 +351,7 @@ impl<'a, T> ArrayViewMut<'a, T, (usize, usize)> for Array2dViewMut<'a, T> where 
     self.data.as_mut_ptr()
   }
 
-  fn view_mut(&mut self, lo: (usize, usize), hi: (usize, usize)) -> Array2dViewMut<'a, T> {
+  fn view_mut(self, lo: (usize, usize), hi: (usize, usize)) -> Array2dViewMut<'a, T> {
     // TODO(20151215)
     unimplemented!();
   }
@@ -369,7 +405,7 @@ impl BitArray3d {
     raw_arr
   }
 
-  pub fn to_byte_array(&self) -> Array3d<u8> {
+  pub fn into_bytes(&self, nonzero_value: u8) -> Array3d<u8> {
     let mut array = unsafe { Array3d::new(self.bound) };
     let len = self.bound.len();
     let raw_len = self.raw_len;
@@ -379,7 +415,11 @@ impl BitArray3d {
         let mask = self.data[p];
         for s in 0 .. 64 {
           if 64 * p + s < len {
-            array.data[idx] = ((mask >> s) & 1) as u8;
+            array.data[idx] = match (mask >> s) & 1 {
+              0 => 0u8,
+              1 => nonzero_value,
+              _ => unreachable!(),
+            };
             idx += 1;
           } else {
             break;
@@ -388,6 +428,40 @@ impl BitArray3d {
       }
     }
     array
+  }
+
+  pub fn write_bytes(&self, nonzero_value: u8, output: &mut Array3dViewMut<u8>) {
+    assert_eq!(self.bound(), output.bound());
+    assert_eq!(self.stride(), output.stride());
+    let len = self.bound.len();
+    let raw_len = self.raw_len;
+    {
+      let mut data = output.as_mut_slice();
+      let mut idx = 0;
+      for p in 0 .. raw_len {
+        let mask = self.data[p];
+        for s in 0 .. 64 {
+          if 64 * p + s < len {
+            data[idx] = match (mask >> s) & 1 {
+              0 => 0u8,
+              1 => nonzero_value,
+              _ => unreachable!(),
+            };
+            idx += 1;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  pub fn bound(&self) -> (usize, usize, usize) {
+    self.bound
+  }
+
+  pub fn stride(&self) -> (usize, usize) {
+    self.bound.to_least_stride()
   }
 }
 
@@ -623,7 +697,7 @@ impl<'a, T> ArrayView<'a, T, (usize, usize, usize)> for Array3dView<'a, T> where
     self.data.as_ptr()
   }
 
-  fn view(&self, lo: (usize, usize, usize), hi: (usize, usize, usize)) -> Array3dView<'a, T> {
+  fn view(self, lo: (usize, usize, usize), hi: (usize, usize, usize)) -> Array3dView<'a, T> {
     // TODO(20151215)
     unimplemented!();
   }
@@ -633,6 +707,22 @@ pub struct Array3dViewMut<'a, T> where T: 'a + Copy {
   data:     &'a mut [T],
   bound:    (usize, usize, usize),
   stride:   (usize, usize),
+}
+
+impl<'a, T> Array3dViewMut<'a, T> where T: 'a + Copy {
+  pub fn as_mut_slice(&mut self) -> &mut [T] {
+    self.data
+  }
+
+  pub fn copy_from(&mut self, src: &Array3dView<'a, T>) {
+    assert_eq!(self.bound(), src.bound());
+    if self.stride() == self.bound().to_least_stride() && self.stride() == src.stride() {
+      self.data.clone_from_slice(src.data);
+    } else {
+      // FIXME(20160202)
+      panic!("unimplemented: strided 3d array copy");
+    }
+  }
 }
 
 impl<'a, T> ArrayViewMut<'a, T, (usize, usize, usize)> for Array3dViewMut<'a, T> where T: 'a + Copy {
@@ -656,8 +746,20 @@ impl<'a, T> ArrayViewMut<'a, T, (usize, usize, usize)> for Array3dViewMut<'a, T>
     self.data.as_mut_ptr()
   }
 
-  fn view_mut(&mut self, lo: (usize, usize, usize), hi: (usize, usize, usize)) -> Array3dViewMut<'a, T> {
-    // TODO(20151215)
-    unimplemented!();
+  fn view_mut(self, lo: (usize, usize, usize), hi: (usize, usize, usize)) -> Array3dViewMut<'a, T> {
+    let new_bound = (hi.0 - lo.0, hi.1 - lo.1, hi.2 - lo.2);
+    let new_offset = lo.offset(self.stride);
+    // FIXME(20160203): array index arithmetic.
+    //let new_offset_end = hi.offset(self.stride);
+    assert_eq!(self.stride, self.bound.to_least_stride());
+    let new_offset_end = new_offset + new_bound.len();
+    assert!(new_offset <= self.data.len());
+    assert!(new_offset_end <= self.data.len());
+    assert!(new_offset <= new_offset_end);
+    Array3dViewMut{
+      data:     &mut self.data[new_offset .. new_offset_end],
+      bound:    new_bound,
+      stride:   self.stride,
+    }
   }
 }
