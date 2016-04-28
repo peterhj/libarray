@@ -601,6 +601,22 @@ impl<T> Array3d<T> where T: Copy {
   }
 }
 
+impl<T> ArrayZeroExt<T, (usize, usize, usize)> for Array3d<T> where T: Zero + Copy {
+  fn zeros(bound: (usize, usize, usize)) -> Array3d<T> {
+    let len = bound.len();
+    let mut data = Vec::with_capacity(len);
+    unsafe { data.set_len(len) };
+    for i in 0 .. len {
+      data[i] = T::zero();
+    }
+    Array3d{
+      data:     data,
+      bound:    bound,
+      stride:   bound.to_least_stride(),
+    }
+  }
+}
+
 impl<T> NdArraySerialize<T, (usize, usize, usize)> for Array3d<T> where T: SerialDataType + Copy {
   fn serial_size(bound: (usize, usize, usize)) -> usize {
     32 + bound.len()
